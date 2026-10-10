@@ -51,6 +51,8 @@ const PLAN_UPGRADE_TEST_IDS = Object.freeze({
 
 const PRICING_PAGE_INITIAL_WAIT_MS = 5000;
 const PRICING_PAGE_READY_TIMEOUT_MS = 10000;
+const PERSONAL_SWITCH_TIMEOUT_MS = 8000;
+const PERSONAL_SWITCH_RETRIES = 3;
 
 const PRO_VARIANTS = Object.freeze({
     pro_5x: { checkoutValue: 'chatgptprolite', pricingRadioLabel: '5x' },
@@ -178,14 +180,102 @@ function matchesCountryLabel(text, labels) {
     return labels.some((label) => normalized === String(label).toLowerCase());
 }
 
+function isSelectedToggleState({ ariaSelected, ariaPressed, dataState } = {}) {
+    return ariaSelected === 'true'
+        || ariaPressed === 'true'
+        || dataState === 'active'
+        || dataState === 'checked';
+}
+
+async function isPersonalUpgradeSurfaceVisible(page) {
+    for (const testId of [...new Set(Object.values(PLAN_UPGRADE_TEST_IDS))]) {
+        const button = page.getByTestId(testId);
+        if (await button.count() !== 1) {
+            continue;
+        }
+        if (await button.isVisible({ timeout: 500 }).catch(() => false)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function getPersonalToggleLocators(page) {
+    return [
+        ['role=tab', () => page.getByRole('tab', { name: /^Personal$/i })],
+        ['role=tab-cn', () => page.getByRole('tab', { name: /^个人$/ })],
+        ['role=button', () => page.getByRole('button', { name: /^Personal$/i })],
+        ['role=button-cn', () => page.getByRole('button', { name: /^个人$/ })],
+        ['role=radio', () => page.getByRole('radio', { name: /^Personal$/i })],
+        ['role=radio-cn', () => page.getByRole('radio', { name: /^个人$/ })],
+        ['tablist text', () => page.locator('[role="tablist"] [role="tab"]').filter({ hasText: /^\s*Personal\s*$/i })],
+        ['tablist text-cn', () => page.locator('[role="tablist"] [role="tab"]').filter({ hasText: /^\s*个人\s*$/ })],
+        ['interactive text', () => page.locator('button,[role="tab"],[role="radio"],[role="button"]').filter({ hasText: /^\s*Personal\s*$/i })],
+        ['interactive text-cn', () => page.locator('button,[role="tab"],[role="radio"],[role="button"]').filter({ hasText: /^\s*个人\s*$/ })],
+        ['personal value', () => page.locator('[data-value="personal" i],[value="personal" i],[data-testid*="personal" i],[data-value="个人"],[value="个人"]')],
+        ['personal text', () => page.getByText('Personal', { exact: true })],
+        ['personal text-cn', () => page.getByText('个人', { exact: true })]
+    ];
+}
+
+async function getVisiblePersonalToggles(page) {
+    const visible = [];
+    for (const [label, getLocator] of getPersonalToggleLocators(page)) {
+        let locator;
+        try {
+            locator = getLocator();
+            const count = await locator.count();
+            for (let index = 0; index < count; index += 1) {
+                const candidate = locator.nth(index);
+                if (await candidate.isVisible({ timeout: 700 }).catch(() => false)) {
+                    visible.push({ label, index, locator: candidate });
+                }
+            }
+        } catch (error) {
+            console.warn(`[Pricing] Personal 候选读取失败: ${label}: ${error.message}`);
+        }
+    }
+    return visible;
+}
+
+async function isPersonalToggleSelected(page) {
+    const candidates = await getVisiblePersonalToggles(page);
+    for (const candidate of candidates) {
+        const state = {
+            ariaSelected: await candidate.locator.getAttribute('aria-selected').catch(() => null),
+            ariaPressed: await candidate.locator.getAttribute('aria-pressed').catch(() => null),
+            dataState: await candidate.locator.getAttribute('data-state').catch(() => null)
+        };
+        if (isSelectedToggleState(state)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+async function waitForPersonalPlans(page, timeout = PERSONAL_SWITCH_TIMEOUT_MS) {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+        if (await isPersonalUpgradeSurfaceVisible(page) || await isPersonalToggleSelected(page)) {
+            return true;
+        }
+        await page.waitForTimeout(350);
+    }
+    return false;
+}
+
 async function isBusinessTabActive(page) {
     const businessTab = page.getByRole('tab', { name: /^Business$/i }).first();
     if (await businessTab.isVisible({ timeout: 800 }).catch(() => false)) {
         const selected = await businessTab.getAttribute('aria-selected').catch(() => null);
         const state = await businessTab.getAttribute('data-state').catch(() => null);
-        if (selected === 'true' || state === 'active') {
+        if (isSelectedToggleState({ ariaSelected: selected, dataState: state })) {
             return true;
         }
+    }
+
+    if (await isPersonalUpgradeSurfaceVisible(page)) {
+        return false;
     }
 
     const businessCard = await page.getByText(/ChatGPT Business/i).first().isVisible({ timeout: 800 }).catch(() => false);
@@ -194,6 +284,14 @@ async function isBusinessTabActive(page) {
 }
 
 async function isPersonalPlanView(page) {
+    if (await isPersonalUpgradeSurfaceVisible(page)) {
+        return true;
+    }
+
+    if (await isPersonalToggleSelected(page)) {
+        return true;
+    }
+
     if (await isBusinessTabActive(page)) {
         return false;
     }
@@ -237,41 +335,49 @@ async function switchToPersonalPlans(page) {
         console.log('🔄 [步骤] 正在切换到「个人 / Personal」套餐...');
     }
 
-    const personalCandidates = [
-        () => page.getByRole('tab', { name: /^Personal$/i }).first(),
-        () => page.getByRole('tab', { name: /^个人$/ }).first(),
-        () => page.getByRole('button', { name: /^Personal$/i }).first(),
-        () => page.getByRole('button', { name: /^个人$/ }).first(),
-        () => page.getByRole('radio', { name: /^Personal$/i }).first(),
-        () => page.locator('[role="tablist"] [role="tab"]').filter({ hasText: /^Personal$/i }).first(),
-        () => page.locator('button').filter({ hasText: /^Personal$/ }).first(),
-        () => page.locator('[role="dialog"]').getByText('Personal', { exact: true }).first(),
-        () => page.getByText('Personal', { exact: true }).first()
-    ];
+    let lastFailure = '未找到可见的 Personal 切换控件';
+    for (let attempt = 1; attempt <= PERSONAL_SWITCH_RETRIES; attempt += 1) {
+        const candidates = await getVisiblePersonalToggles(page);
+        console.log(`[Pricing] Personal 候选控件: ${candidates.length} 个（第 ${attempt}/${PERSONAL_SWITCH_RETRIES} 次）`);
 
-    for (const getLocator of personalCandidates) {
-        try {
-            const el = getLocator();
-            if (await el.isVisible({ timeout: 1200 })) {
-                const selected = await el.getAttribute('aria-selected').catch(() => null);
-                const pressed = await el.getAttribute('aria-pressed').catch(() => null);
-                if (selected === 'true' || pressed === 'true') {
-                    console.log('✅ [步骤] Personal 标签已选中');
+        for (const candidate of candidates) {
+            try {
+                const state = {
+                    ariaSelected: await candidate.locator.getAttribute('aria-selected').catch(() => null),
+                    ariaPressed: await candidate.locator.getAttribute('aria-pressed').catch(() => null),
+                    dataState: await candidate.locator.getAttribute('data-state').catch(() => null)
+                };
+                if (isSelectedToggleState(state)) {
+                    console.log(`✅ [步骤] Personal 标签已选中（${candidate.label}）`);
                     return;
                 }
-                await el.scrollIntoViewIfNeeded().catch(() => {});
-                await el.click({ timeout: 8000 });
-                await page.waitForTimeout(1800);
-                if (await isPersonalPlanView(page)) {
-                    console.log('✅ [步骤] 已切换到个人套餐 (Personal)');
+                await candidate.locator.scrollIntoViewIfNeeded().catch(() => {});
+                await candidate.locator.click({ timeout: 8000 });
+                if (await waitForPersonalPlans(page)) {
+                    console.log(`✅ [步骤] 已切换到个人套餐 (Personal)（${candidate.label}）`);
                     return;
                 }
+                lastFailure = `点击 ${candidate.label} 后未出现 Personal 套餐控件`;
+            } catch (error) {
+                lastFailure = `${candidate.label} 点击失败: ${error.message}`;
+                console.warn(`[Pricing] ${lastFailure}`);
             }
-        } catch (_) { /* try next */ }
+        }
+
+        if (attempt < PERSONAL_SWITCH_RETRIES) {
+            await page.waitForTimeout(700);
+            if (attempt === 2 && typeof page.reload === 'function') {
+                console.warn('[Pricing] Personal 切换仍未确认，刷新定价页后重试');
+                await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch((error) => {
+                    console.warn(`[Pricing] 定价页刷新失败: ${error.message}`);
+                });
+                await page.waitForTimeout(PRICING_PAGE_INITIAL_WAIT_MS);
+            }
+        }
     }
 
     if (await isBusinessPlanView(page)) {
-        throw new Error('定价页停留在 Business 套餐，未能切换到 Personal，无法购买 Plus/Pro');
+        throw new Error(`定价页停留在 Business 套餐，未能切换到 Personal，无法购买 Plus/Pro（${lastFailure}）`);
     }
 
     console.warn('[Warn] 未能确认 Personal 切换，将继续查找升级按钮');
@@ -812,6 +918,7 @@ module.exports = {
     waitForPricingPlanSelector,
     selectProVariantOnPricingPage,
     selectProVariantOnCheckoutPage,
+    isSelectedToggleState,
     openPricingCheckout,
     waitForPricingPage,
     selectPricingRegion,

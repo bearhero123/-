@@ -4,6 +4,7 @@ const {
     PLAN_UPGRADE_TEST_IDS,
     PRO_VARIANTS,
     getUniqueVisiblePlanButton,
+    isSelectedToggleState,
     isPricingPlanSelectorVisible,
     resolvePlanUpgradeTestId,
     selectProVariantOnCheckoutPage,
@@ -65,6 +66,14 @@ const createProCheckoutPage = ({ count = 1, visible = true } = {}) => {
 };
 
 describe('pricing checkout plan button', () => {
+    it('recognizes supported selected states for pricing toggles', () => {
+        expect(isSelectedToggleState({ ariaSelected: 'true' })).toBe(true);
+        expect(isSelectedToggleState({ ariaPressed: 'true' })).toBe(true);
+        expect(isSelectedToggleState({ dataState: 'active' })).toBe(true);
+        expect(isSelectedToggleState({ dataState: 'checked' })).toBe(true);
+        expect(isSelectedToggleState({ ariaSelected: 'false', ariaPressed: 'false', dataState: 'inactive' })).toBe(false);
+    });
+
     it('uses the verified test ids for Plus and Pro', () => {
         expect(PLAN_UPGRADE_TEST_IDS).toEqual({
             plus: 'select-plan-button-plus-upgrade',

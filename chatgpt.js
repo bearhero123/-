@@ -29,6 +29,14 @@ function formatApiErrorDetail(detail, fallback = '') {
     return String(detail);
 }
 
+function classifyCheckoutError(detail) {
+    const message = String(detail || '').toLowerCase();
+    if (/unusual activity|suspicious activity|risk|forbidden|too many requests|rate limit|cloudflare|captcha/.test(message)) {
+        return 'RISK_REJECTED';
+    }
+    return 'CHECKOUT_REJECTED';
+}
+
 function parseCheckoutApiResponse(status, bodyText) {
     let data = {};
     try {
@@ -189,14 +197,16 @@ class ChatGPTService {
 
             if (!parsed.ok) {
                 const detail = parsed.error;
+                const errorCode = classifyCheckoutError(detail);
                 console.error(`[-] 订单创建失败 (Status: ${parsed.status})`);
+                console.error(`    错误分类: ${errorCode}`);
                 console.error(`    响应: ${detail}`);
                 if (String(detail).includes('not_eligible') || String(detail).includes('Offer not found')) {
                     console.error("❌ [提示] 该账号不符合当前套餐/地区订阅条件");
                 } else if (String(detail).includes('permission') || String(detail).includes('already_subscribed')) {
                     console.error("❌ [提示] 该账号可能已订阅或无权重复开通");
                 }
-                return { sessionId: null, checkoutUrl: null, error: detail };
+                return { sessionId: null, checkoutUrl: null, error: detail, errorCode };
             }
 
             console.log(`✅ 订单创建成功 (session: ${parsed.sessionId ? parsed.sessionId.slice(0, 24) + '...' : 'unknown'})`);
@@ -393,7 +403,9 @@ async function openApiCheckout(page, { accessToken, planType, country, currency,
     const gpt = new ChatGPTService(page.context().request, token);
     const checkout = await gpt.createCheckoutSession(planType, region, billingCurrency, planNameOverride);
     if (!checkout.checkoutUrl) {
-        throw new Error(`API 创建 Checkout 失败: ${checkout.error || '未返回 data.url'}`);
+        const error = new Error(`API 创建 Checkout 失败: ${checkout.error || '未返回 data.url'}`);
+        error.errorCode = checkout.errorCode || 'CHECKOUT_REJECTED';
+        throw error;
     }
 
     const url = checkout.checkoutUrl;
@@ -446,3 +458,4 @@ module.exports.openApiCheckout = openApiCheckout;
 module.exports.createHostedCheckoutLink = createHostedCheckoutLink;
 module.exports.buildCheckoutPayload = buildCheckoutPayload;
 module.exports.formatApiErrorDetail = formatApiErrorDetail;
+module.exports.classifyCheckoutError = classifyCheckoutError;

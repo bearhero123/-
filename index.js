@@ -557,7 +557,8 @@ async function run() {
                 });
                 checkoutOpened = true;
             } catch (apiError) {
-                console.warn(`[Warn] API Checkout 失败: ${apiError.message}`);
+                const errorCode = String(apiError?.errorCode || '').trim();
+                console.warn(`[Warn] API Checkout 失败${errorCode ? ` [${errorCode}]` : ''}: ${apiError.message}`);
                 if (checkoutMode === 'api') {
                     console.log('[Info] 正在回退到 UI 定价页流程...');
                 } else {
